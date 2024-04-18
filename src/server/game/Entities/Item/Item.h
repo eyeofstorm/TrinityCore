@@ -172,7 +172,7 @@ class TC_GAME_API Item : public Object
     friend void RemoveItemFromUpdateQueueOf(Item* item, Player* player);
 
     public:
-        static Item* CreateItem(uint32 itemEntry, uint32 count, ItemContext context, Player const* player = nullptr);
+        static Item* CreateItem(uint32 itemEntry, uint32 count, ItemContext context, Player const* player = nullptr, bool addDefaultBonuses = true);
         Item* CloneItem(uint32 count, Player const* player = nullptr) const;
 
         Item();
@@ -309,6 +309,7 @@ class TC_GAME_API Item : public Object
         void SendTimeUpdate(Player* owner);
         void UpdateDuration(Player* owner, uint32 diff);
         void SetCreatePlayedTime(uint32 createPlayedTime) { SetUpdateFieldValue(m_values.ModifyValue(&Item::m_itemData).ModifyValue(&UF::ItemData::CreatePlayedTime), createPlayedTime); }
+        void SetCreateTime(int64 createTime) { SetUpdateFieldValue(m_values.ModifyValue(&Item::m_itemData).ModifyValue(&UF::ItemData::CreateTime), createTime); }
 
         // spell charges (signed but stored as unsigned)
         int32 GetSpellCharges(uint8 index/*0..5*/ = 0) const { return m_itemData->SpellCharges[index]; }
@@ -363,9 +364,8 @@ class TC_GAME_API Item : public Object
         uint64 GetPaidMoney() const { return m_paidMoney; }
         uint32 GetPaidExtendedCost() const { return m_paidExtendedCost; }
 
-        void UpdatePlayedTime(Player* owner);
-        uint32 GetPlayedTime();
-        bool IsRefundExpired();
+        uint32 GetPlayedTime() const;
+        bool IsRefundExpired() const;
 
         // Soulbound trade system
         void SetSoulboundTradeable(GuidSet const& allowedLooters);
@@ -412,6 +412,7 @@ class TC_GAME_API Item : public Object
 
         uint32 GetVisibleEntry(Player const* owner) const;
         uint16 GetVisibleAppearanceModId(Player const* owner) const;
+        uint32 GetVisibleModifiedAppearanceId(Player const* owner) const;
         int32 GetVisibleSecondaryModifiedAppearanceId(Player const* owner) const;
         uint32 GetVisibleEnchantmentId(Player const* owner) const;
         uint16 GetVisibleItemVisual(Player const* owner) const;
@@ -448,7 +449,6 @@ class TC_GAME_API Item : public Object
         UF::UpdateField<UF::ItemData, 0, TYPEID_ITEM> m_itemData;
 
     protected:
-        void ApplyBonusList(uint32 itemBonusListId);
         BonusData _bonusData;
 
     private:
@@ -458,7 +458,6 @@ class TC_GAME_API Item : public Object
         ItemUpdateState uState;
         int16 uQueuePos;
         bool mb_in_trade;                                   // true if item is currently in trade-window
-        time_t m_lastPlayedTimeUpdate;
         ObjectGuid m_refundRecipient;
         uint64 m_paidMoney;
         uint32 m_paidExtendedCost;

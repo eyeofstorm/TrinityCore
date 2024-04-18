@@ -22,6 +22,7 @@
 #include "ObjectGuid.h"
 #include "Tuples.h"
 #include "Types.h"
+#include <boost/preprocessor/punctuation/remove_parens.hpp>
 #include <memory>
 #include <vector>
 
@@ -34,6 +35,7 @@ class AuraScript;
 class Battlefield;
 class Battleground;
 class BattlegroundMap;
+class BattlegroundScript;
 class Channel;
 class Conversation;
 class Creature;
@@ -371,6 +373,9 @@ class TC_GAME_API BattlegroundMapScript : public ScriptObject, public MapScript<
     public:
 
         ~BattlegroundMapScript();
+
+        // Gets an BattlegroundScript object for this battleground.
+        virtual BattlegroundScript* GetBattlegroundScript(BattlegroundMap* map) const;
 };
 
 class TC_GAME_API ItemScript : public ScriptObject
@@ -498,20 +503,6 @@ class TC_GAME_API BattlefieldScript : public ScriptObject
         ~BattlefieldScript();
 
         virtual Battlefield* GetBattlefield(Map* map) const = 0;
-};
-
-class TC_GAME_API BattlegroundScript : public ScriptObject
-{
-    protected:
-
-        explicit BattlegroundScript(char const* name);
-
-    public:
-
-        ~BattlegroundScript();
-
-        // Should return a fully valid Battleground object for the type ID.
-        virtual Battleground* GetBattleground() const = 0;
 };
 
 class TC_GAME_API OutdoorPvPScript : public ScriptObject
@@ -923,8 +914,14 @@ class TC_GAME_API ConversationScript : public ScriptObject
         // Called when Conversation is created but not added to Map yet.
         virtual void OnConversationCreate(Conversation* conversation, Unit* creator);
 
+        // Called when Conversation is started
+        virtual void OnConversationStart(Conversation* conversation);
+
         // Called when player sends CMSG_CONVERSATION_LINE_STARTED with valid conversation guid
         virtual void OnConversationLineStarted(Conversation* conversation, uint32 lineId, Player* sender);
+
+        // Called for each update tick
+        virtual void OnConversationUpdate(Conversation* conversation, uint32 diff);
 };
 
 class TC_GAME_API SceneScript : public ScriptObject
@@ -982,6 +979,20 @@ class TC_GAME_API WorldStateScript : public ScriptObject
 
         // Called when worldstate changes value, map is optional
         virtual void OnValueChange(int32 worldStateId, int32 oldValue, int32 newValue, Map const* map);
+};
+
+class TC_GAME_API EventScript : public ScriptObject
+{
+    protected:
+
+        explicit EventScript(char const* name);
+
+    public:
+
+        ~EventScript();
+
+        // Called when a game event is triggered
+        virtual void OnTrigger(WorldObject* object, WorldObject* invoker, uint32 eventId);
 };
 
 // Manages registration, loading, and execution of scripts.
@@ -1130,7 +1141,7 @@ class TC_GAME_API ScriptMgr
 
     public: /* BattlegroundScript */
 
-        Battleground* CreateBattleground(BattlegroundTypeId typeId);
+        BattlegroundScript* CreateBattlegroundData(BattlegroundMap* map);
 
     public: /* OutdoorPvPScript */
 
@@ -1269,7 +1280,9 @@ class TC_GAME_API ScriptMgr
     public: /* ConversationScript */
 
         void OnConversationCreate(Conversation* conversation, Unit* creator);
+        void OnConversationStart(Conversation* conversation);
         void OnConversationLineStarted(Conversation* conversation, uint32 lineId, Player* sender);
+        void OnConversationUpdate(Conversation* conversation, uint32 diff);
 
     public: /* SceneScript */
 
@@ -1287,6 +1300,10 @@ class TC_GAME_API ScriptMgr
     public: /* WorldStateScript */
 
         void OnWorldStateValueChange(WorldStateTemplate const* worldStateTemplate, int32 oldValue, int32 newValue, Map const* map);
+
+    public: /* EventScript */
+
+        void OnEventTrigger(WorldObject* object, WorldObject* invoker, uint32 eventId);
 
     private:
         uint32 _scriptCount;
@@ -1313,6 +1330,8 @@ class GenericSpellAndAuraScriptLoader : public SpellScriptLoader
     using AuraScriptType = typename Trinity::find_type_if_t<Trinity::SpellScripts::is_AuraScript, Ts...>;
     using ArgsType = typename Trinity::find_type_if_t<Trinity::is_tuple, Ts...>;
 
+    static_assert(!std::conjunction_v<std::is_same<SpellScriptType, Trinity::find_type_end>, std::is_same<AuraScriptType, Trinity::find_type_end>>, "At least one of SpellScript/AuraScript arguments must be provided for GenericSpellAndAuraScriptLoader");
+
 public:
     GenericSpellAndAuraScriptLoader(char const* name, ArgsType&& args) : SpellScriptLoader(name), _args(std::move(args)) { }
 
@@ -1336,9 +1355,9 @@ private:
     ArgsType _args;
 };
 
-#define RegisterSpellScriptWithArgs(spell_script, script_name, ...) new GenericSpellAndAuraScriptLoader<spell_script, decltype(std::make_tuple(__VA_ARGS__))>(script_name, std::make_tuple(__VA_ARGS__))
+#define RegisterSpellScriptWithArgs(spell_script, script_name, ...) new GenericSpellAndAuraScriptLoader<BOOST_PP_REMOVE_PARENS(spell_script), decltype(std::make_tuple(__VA_ARGS__))>(script_name, std::make_tuple(__VA_ARGS__))
 #define RegisterSpellScript(spell_script) RegisterSpellScriptWithArgs(spell_script, #spell_script)
-#define RegisterSpellAndAuraScriptPairWithArgs(script_1, script_2, script_name, ...) new GenericSpellAndAuraScriptLoader<script_1, script_2, decltype(std::make_tuple(__VA_ARGS__))>(script_name, std::make_tuple(__VA_ARGS__))
+#define RegisterSpellAndAuraScriptPairWithArgs(script_1, script_2, script_name, ...) new GenericSpellAndAuraScriptLoader<BOOST_PP_REMOVE_PARENS(script_1), BOOST_PP_REMOVE_PARENS(script_2), decltype(std::make_tuple(__VA_ARGS__))>(script_name, std::make_tuple(__VA_ARGS__))
 #define RegisterSpellAndAuraScriptPair(script_1, script_2) RegisterSpellAndAuraScriptPairWithArgs(script_1, script_2, #script_1)
 
 template <class AI>
@@ -1385,6 +1404,16 @@ class GenericAreaTriggerEntityScript : public AreaTriggerEntityScript
         AreaTriggerAI* GetAI(AreaTrigger* at) const override { return new AI(at); }
 };
 #define RegisterAreaTriggerAI(ai_name) new GenericAreaTriggerEntityScript<ai_name>(#ai_name)
+
+template<class Script>
+class GenericBattlegroundMapScript : public BattlegroundMapScript
+{
+public:
+    GenericBattlegroundMapScript(char const* name, uint32 mapId) : BattlegroundMapScript(name, mapId) { }
+
+    BattlegroundScript* GetBattlegroundScript(BattlegroundMap* map) const override { return new Script(map); }
+};
+#define RegisterBattlegroundMapScript(script_name, mapId) new GenericBattlegroundMapScript<script_name>(#script_name, mapId)
 
 #define sScriptMgr ScriptMgr::instance()
 

@@ -58,8 +58,7 @@ void WorldSession::HandleTransmogrifyItems(WorldPackets::Transmogrification::Tra
             return false;
         }
 
-        bool hasAppearance, isTemporary;
-        std::tie(hasAppearance, isTemporary) = GetCollectionMgr()->HasItemAppearance(itemModifiedAppearanceId);
+        auto [hasAppearance, isTemporary] = GetCollectionMgr()->HasItemAppearance(itemModifiedAppearanceId);
         if (!hasAppearance)
         {
             TC_LOG_DEBUG("network", "WORLD: HandleTransmogrifyItems - {}, Name: {} tried to transmogrify using appearance he has not collected ({}).", player->GetGUID().ToString(), player->GetName(), itemModifiedAppearanceId);
@@ -136,13 +135,10 @@ void WorldSession::HandleTransmogrifyItems(WorldPackets::Transmogrification::Tra
                 return;
             }
 
-            if (PlayerConditionEntry const* condition = sPlayerConditionStore.LookupEntry(illusion->UnlockConditionID))
+            if (!ConditionMgr::IsPlayerMeetingCondition(player, illusion->UnlockConditionID))
             {
-                if (!ConditionMgr::IsPlayerMeetingCondition(player, condition))
-                {
-                    TC_LOG_DEBUG("network", "WORLD: HandleTransmogrifyItems - {}, Name: {} tried to transmogrify illusion using not allowed enchant ({}).", player->GetGUID().ToString(), player->GetName(), transmogItem.SpellItemEnchantmentID);
-                    return;
-                }
+                TC_LOG_DEBUG("network", "WORLD: HandleTransmogrifyItems - {}, Name: {} tried to transmogrify illusion using not allowed enchant ({}).", player->GetGUID().ToString(), player->GetName(), transmogItem.SpellItemEnchantmentID);
+                return;
             }
 
             illusionItems[itemTransmogrified] = transmogItem.SpellItemEnchantmentID;

@@ -106,7 +106,7 @@ bool WorldSessionFilter::Process(WorldPacket* packet)
 
 /// WorldSession constructor
 WorldSession::WorldSession(uint32 id, std::string&& name, uint32 battlenetAccountId, std::shared_ptr<WorldSocket> sock, AccountTypes sec, uint8 expansion, time_t mute_time,
-    std::string os, LocaleConstant locale, uint32 recruiter, bool isARecruiter):
+    std::string os, Minutes timezoneOffset, LocaleConstant locale, uint32 recruiter, bool isARecruiter):
     m_muteTime(mute_time),
     m_timeOutTime(0),
     AntiDOS(this),
@@ -118,7 +118,7 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 battlenetAccoun
     _battlenetAccountId(battlenetAccountId),
     m_accountExpansion(expansion),
     m_expansion(std::min<uint8>(expansion, sWorld->getIntConfig(CONFIG_EXPANSION))),
-    _os(os),
+    _os(std::move(os)),
     _battlenetRequestToken(0),
     _logoutTime(0),
     m_inQueue(false),
@@ -127,6 +127,7 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 battlenetAccoun
     m_playerSave(false),
     m_sessionDbcLocale(sWorld->GetAvailableDbcLocale(locale)),
     m_sessionDbLocaleIndex(locale),
+    _timezoneOffset(timezoneOffset),
     m_latency(0),
     _tutorialsChanged(TUTORIALS_FLAG_NONE),
     _filterAddonMessages(false),
@@ -153,7 +154,7 @@ WorldSession::WorldSession(uint32 id, std::string&& name, uint32 battlenetAccoun
         LoginDatabase.PExecute("UPDATE account SET online = 1 WHERE id = {};", GetAccountId());     // One-time query
     }
 
-    m_Socket[CONNECTION_TYPE_REALM] = sock;
+    m_Socket[CONNECTION_TYPE_REALM] = std::move(sock);
     _instanceConnectKey.Raw = UI64LIT(0);
 }
 
@@ -197,17 +198,13 @@ std::string const & WorldSession::GetPlayerName() const
 
 std::string WorldSession::GetPlayerInfo() const
 {
-    std::ostringstream ss;
+    if (_player)
+        return Trinity::StringFormat("[Player: {} {}, Account: {}]", _player->GetName(), _player->GetGUID(), GetAccountId());
 
-    ss << "[Player: ";
     if (!m_playerLoading.IsEmpty())
-        ss << "Logging in: " << m_playerLoading.ToString() << ", ";
-    else if (_player)
-        ss << _player->GetName() << ' ' << _player->GetGUID().ToString() << ", ";
+        return Trinity::StringFormat("[Player: Logging in: {}, Account: {}]", m_playerLoading, GetAccountId());
 
-    ss << "Account: " << GetAccountId() << "]";
-
-    return ss.str();
+    return Trinity::StringFormat("[Player: Account: {}]", GetAccountId());
 }
 
 /// Send a packet to the client
@@ -614,6 +611,8 @@ void WorldSession::LogoutPlayer(bool save)
 
         ///- Clear whisper whitelist
         _player->ClearWhisperWhiteList();
+
+        _player->FailQuestsWithFlag(QUEST_FLAGS_FAIL_ON_LOGOUT);
 
         ///- empty buyback items and save the player in the database
         // some save parts only correctly work in case player present in map/player_lists (pets, etc)

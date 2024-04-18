@@ -391,12 +391,8 @@ bool CollectionMgr::AddMount(uint32 spellId, MountStatusFlags flags, bool factio
     _mounts.insert(MountContainer::value_type(spellId, flags));
 
     // Mount condition only applies to using it, should still learn it.
-    if (mount->PlayerConditionID)
-    {
-        PlayerConditionEntry const* playerCondition = sPlayerConditionStore.LookupEntry(mount->PlayerConditionID);
-        if (playerCondition && !ConditionMgr::IsPlayerMeetingCondition(player, playerCondition))
-            return false;
-    }
+    if (!ConditionMgr::IsPlayerMeetingCondition(player, mount->PlayerConditionID))
+        return false;
 
     if (!learned)
     {
@@ -653,8 +649,7 @@ bool CollectionMgr::IsSetCompleted(uint32 transmogSetId) const
         if (transmogSlot < 0 || knownPieces[transmogSlot] == 1)
             continue;
 
-        bool hasAppearance, isTemporary;
-        std::tie(hasAppearance, isTemporary) = HasItemAppearance(transmogSetItem->ItemModifiedAppearanceID);
+        auto [hasAppearance, isTemporary] = HasItemAppearance(transmogSetItem->ItemModifiedAppearanceID);
 
         knownPieces[transmogSlot] = (hasAppearance && !isTemporary) ? 1 : 0;
     }
@@ -734,10 +729,6 @@ bool CollectionMgr::CanAddAppearance(ItemModifiedAppearanceEntry const* itemModi
         default:
             return false;
     }
-
-    if (itemTemplate->GetQuality() < ITEM_QUALITY_UNCOMMON)
-        if (!itemTemplate->HasFlag(ITEM_FLAG2_IGNORE_QUALITY_FOR_ITEM_VISUAL_SOURCE) || !itemTemplate->HasFlag(ITEM_FLAG3_ACTS_AS_TRANSMOG_HIDDEN_VISUAL_OPTION))
-            return false;
 
     if (itemModifiedAppearance->ID < _appearances->size() && _appearances->test(itemModifiedAppearance->ID))
         return false;

@@ -34,10 +34,12 @@
 #include "GitRevision.h"
 #include "InstanceLockMgr.h"
 #include "IoContext.h"
+#include "IpNetwork.h"
+#include "Locales.h"
 #include "MapManager.h"
+#include "Memory.h"
 #include "Metric.h"
 #include "MySQLThreading.h"
-#include "ObjectAccessor.h"
 #include "OpenSSLCrypto.h"
 #include "OutdoorPvP/OutdoorPvPMgr.h"
 #include "ProcessPriority.h"
@@ -73,6 +75,10 @@ namespace fs = boost::filesystem;
     #define _TRINITY_CORE_CONFIG  "worldserver.conf"
 #endif
 
+#ifndef _TRINITY_CORE_CONFIG_DIR
+    #define _TRINITY_CORE_CONFIG_DIR "worldserver.conf.d"
+#endif
+
 #ifdef _WIN32
 #include "ServiceWin32.h"
 char serviceName[] = "worldserver";
@@ -99,7 +105,10 @@ public:
     static void Start(std::shared_ptr<FreezeDetector> const& freezeDetector)
     {
         freezeDetector->_timer.expires_from_now(boost::posix_time::seconds(5));
-        freezeDetector->_timer.async_wait(std::bind(&FreezeDetector::Handler, std::weak_ptr<FreezeDetector>(freezeDetector), std::placeholders::_1));
+        freezeDetector->_timer.async_wait([freezeDetectorRef = std::weak_ptr(freezeDetector)](boost::system::error_code const& error) mutable
+        {
+            Handler(std::move(freezeDetectorRef), error);
+        });
     }
 
     static void Handler(std::weak_ptr<FreezeDetector> freezeDetectorRef, boost::system::error_code const& error);
@@ -117,38 +126,46 @@ bool StartDB();
 void StopDB();
 void WorldUpdateLoop();
 void ClearOnlineAccounts();
-void ShutdownCLIThread(std::thread* cliThread);
+struct ShutdownTCSoapThread { void operator()(std::thread* thread) const; };
+struct ShutdownCLIThread { void operator()(std::thread* cliThread) const; };
 bool LoadRealmInfo();
-variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile, std::string& cfg_service);
+variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile, fs::path& configDir, std::string& winServiceAction);
 
 /// Launch the Trinity server
 extern int main(int argc, char** argv)
 {
     signal(SIGABRT, &Trinity::AbortHandler);
 
-    auto configFile = fs::absolute(_TRINITY_CORE_CONFIG);
-    std::string configService;
+    Trinity::VerifyOsVersion();
 
-    auto vm = GetConsoleArguments(argc, argv, configFile, configService);
+    Trinity::Locale::Init();
+
+    auto configFile = fs::absolute(_TRINITY_CORE_CONFIG);
+    auto configDir  = fs::absolute(_TRINITY_CORE_CONFIG_DIR);
+    std::string winServiceAction;
+
+    auto vm = GetConsoleArguments(argc, argv, configFile, configDir, winServiceAction);
     // exit if help or version is enabled
     if (vm.count("help") || vm.count("version"))
         return 0;
 
+    uint32 dummy = 0;
+
     GOOGLE_PROTOBUF_VERIFY_VERSION;
 
-    std::shared_ptr<void> protobufHandle(nullptr, [](void*) { google::protobuf::ShutdownProtobufLibrary(); });
+    auto protobufHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*) { google::protobuf::ShutdownProtobufLibrary(); });
 
 #ifdef _WIN32
-    if (configService.compare("install") == 0)
+    if (winServiceAction == "install")
         return WinServiceInstall() ? 0 : 1;
-    else if (configService.compare("uninstall") == 0)
+    if (winServiceAction == "uninstall")
         return WinServiceUninstall() ? 0 : 1;
-    else if (configService.compare("run") == 0)
-        return WinServiceRun() ? 0 : 0;
+    if (winServiceAction == "run")
+        return WinServiceRun() ? 0 : 1;
 
     Optional<UINT> newTimerResolution;
     boost::system::error_code dllError;
-    std::shared_ptr<boost::dll::shared_library> winmm(new boost::dll::shared_library("winmm.dll", dllError, boost::dll::load_mode::search_system_folders), [&](boost::dll::shared_library* lib)
+    auto winmm = Trinity::make_unique_ptr_with_deleter(new boost::dll::shared_library("winmm.dll", dllError, boost::dll::load_mode::search_system_folders), [&](boost::dll::shared_library* lib)
     {
         try
         {
@@ -194,6 +211,20 @@ extern int main(int argc, char** argv)
         return 1;
     }
 
+    std::vector<std::string> loadedConfigFiles;
+    std::vector<std::string> configDirErrors;
+    bool additionalConfigFileLoadSuccess = sConfigMgr->LoadAdditionalDir(configDir.generic_string(), true, loadedConfigFiles, configDirErrors);
+    for (std::string const& loadedConfigFile : loadedConfigFiles)
+        printf("Loaded additional config file %s\n", loadedConfigFile.c_str());
+
+    if (!additionalConfigFileLoadSuccess)
+    {
+        for (std::string const& configDirError : configDirErrors)
+            printf("Error in additional config files: %s\n", configDirError.c_str());
+
+        return 1;
+    }
+
     std::vector<std::string> overriddenKeys = sConfigMgr->OverrideWithEnvVariablesIfAny();
 
     std::shared_ptr<Trinity::Asio::IoContext> ioContext = std::make_shared<Trinity::Asio::IoContext>();
@@ -220,7 +251,7 @@ extern int main(int argc, char** argv)
 
     OpenSSLCrypto::threadsSetup(boost::dll::program_location().remove_filename());
 
-    std::shared_ptr<void> opensslHandle(nullptr, [](void*) { OpenSSLCrypto::threadsCleanup(); });
+    auto opensslHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*) { OpenSSLCrypto::threadsCleanup(); });
 
     // Seed the OpenSSL's PRNG here.
     // That way it won't auto-seed when calling BigNumber::SetRand and slow down the first world login
@@ -252,12 +283,12 @@ extern int main(int argc, char** argv)
     if (numThreads < 1)
         numThreads = 1;
 
-    std::shared_ptr<Trinity::ThreadPool> threadPool = std::make_shared<Trinity::ThreadPool>(numThreads);
+    std::unique_ptr<Trinity::ThreadPool> threadPool = std::make_unique<Trinity::ThreadPool>(numThreads);
 
     for (int i = 0; i < numThreads; ++i)
         threadPool->PostWork([ioContext]() { ioContext->run(); });
 
-    std::shared_ptr<void> ioContextStopHandle(nullptr, [ioContext](void*) { ioContext->stop(); });
+    auto ioContextStopHandle = Trinity::make_unique_ptr_with_deleter(ioContext.get(), [](Trinity::Asio::IoContext* ctx) { ctx->stop(); });
 
     // Set process priority according to configuration settings
     SetProcessPriority("server.worldserver", sConfigMgr->GetIntDefault(CONFIG_PROCESSOR_AFFINITY, 0), sConfigMgr->GetBoolDefault(CONFIG_HIGH_PRIORITY, false));
@@ -266,17 +297,19 @@ extern int main(int argc, char** argv)
     if (!StartDB())
         return 1;
 
-    std::shared_ptr<void> dbHandle(nullptr, [](void*) { StopDB(); });
+    auto dbHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*) { StopDB(); });
 
     if (vm.count("update-databases-only"))
         return 0;
+
+    Trinity::Net::ScanLocalNetworks();
 
     // Set server offline (not connectable)
     LoginDatabase.DirectPExecute("UPDATE realmlist SET flag = flag | {} WHERE id = '{}'", REALM_FLAG_OFFLINE, realm.Id.Realm);
 
     sRealmList->Initialize(*ioContext, sConfigMgr->GetIntDefault("RealmsStateUpdateDelay", 10));
 
-    std::shared_ptr<void> sRealmListHandle(nullptr, [](void*) { sRealmList->Close(); });
+    auto sRealmListHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*) { sRealmList->Close(); });
 
     LoadRealmInfo();
 
@@ -290,14 +323,14 @@ extern int main(int argc, char** argv)
 
     TC_METRIC_EVENT("events", "Worldserver started", "");
 
-    std::shared_ptr<void> sMetricHandle(nullptr, [](void*)
+    auto sMetricHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*)
     {
         TC_METRIC_EVENT("events", "Worldserver shutdown", "");
         sMetric->Unload();
     });
 
     sScriptMgr->SetScriptLoader(AddScripts);
-    std::shared_ptr<void> sScriptMgrHandle(nullptr, [](void*)
+    auto sScriptMgrHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*)
     {
         sScriptMgr->Unload();
         sScriptReloadMgr->Unload();
@@ -307,13 +340,13 @@ extern int main(int argc, char** argv)
     sSecretMgr->Initialize(SECRET_OWNER_WORLDSERVER);
     sWorld->SetInitialWorldSettings();
 
-    std::shared_ptr<void> mapManagementHandle(nullptr, [](void*)
+    auto mapManagementHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*)
     {
         // unload battleground templates before different singletons destroyed
         sBattlegroundMgr->DeleteAllBattlegrounds();
 
-        sOutdoorPvPMgr->Die();                    // unload it before MapManager
         sMapMgr->UnloadAll();                     // unload all grids (including locked in memory)
+        sOutdoorPvPMgr->Die();
         sTerrainMgr.UnloadAll();
         sInstanceLockMgr.Unload();
     });
@@ -324,16 +357,9 @@ extern int main(int argc, char** argv)
         raAcceptor.reset(StartRaSocketAcceptor(*ioContext));
 
     // Start soap serving thread if enabled
-    std::shared_ptr<std::thread> soapThread;
+    std::unique_ptr<std::thread, ShutdownTCSoapThread> soapThread;
     if (sConfigMgr->GetBoolDefault("SOAP.Enabled", false))
-    {
-        soapThread.reset(new std::thread(TCSoapThread, sConfigMgr->GetStringDefault("SOAP.IP", "127.0.0.1"), uint16(sConfigMgr->GetIntDefault("SOAP.Port", 7878))),
-            [](std::thread* thr)
-        {
-            thr->join();
-            delete thr;
-        });
-    }
+        soapThread.reset(new std::thread(TCSoapThread, sConfigMgr->GetStringDefault("SOAP.IP", "127.0.0.1"), uint16(sConfigMgr->GetIntDefault("SOAP.Port", 7878))));
 
     // Launch the worldserver listener socket
     uint16 worldPort = uint16(sWorld->getIntConfig(CONFIG_PORT_WORLD));
@@ -356,7 +382,7 @@ extern int main(int argc, char** argv)
         return 1;
     }
 
-    std::shared_ptr<void> sWorldSocketMgrHandle(nullptr, [](void*)
+    auto sWorldSocketMgrHandle = Trinity::make_unique_ptr_with_deleter(&dummy, [](void*)
     {
         sWorld->KickAll();                                       // save and kick all players
         sWorld->UpdateSessions(1);                             // real players unload required UpdateSessions call
@@ -386,14 +412,14 @@ extern int main(int argc, char** argv)
     TC_LOG_INFO("server.worldserver", "{} (worldserver-daemon) ready...", GitRevision::GetFullVersion());
 
     // Launch CliRunnable thread
-    std::shared_ptr<std::thread> cliThread;
+    std::unique_ptr<std::thread, ShutdownCLIThread> cliThread;
 #ifdef _WIN32
     if (sConfigMgr->GetBoolDefault("Console.Enable", true) && (m_ServiceStatus == -1)/* need disable console in service mode*/)
 #else
     if (sConfigMgr->GetBoolDefault("Console.Enable", true))
 #endif
     {
-        cliThread.reset(new std::thread(CliThread), &ShutdownCLIThread);
+        cliThread.reset(new std::thread(CliThread));
     }
 
     WorldUpdateLoop();
@@ -422,7 +448,13 @@ extern int main(int argc, char** argv)
     return World::GetExitCode();
 }
 
-void ShutdownCLIThread(std::thread* cliThread)
+void ShutdownTCSoapThread::operator()(std::thread* thread) const
+{
+    thread->join();
+    delete thread;
+}
+
+void ShutdownCLIThread::operator()(std::thread* cliThread) const
 {
     if (cliThread != nullptr)
     {
@@ -570,7 +602,10 @@ void FreezeDetector::Handler(std::weak_ptr<FreezeDetector> freezeDetectorRef, bo
             }
 
             freezeDetector->_timer.expires_from_now(boost::posix_time::seconds(1));
-            freezeDetector->_timer.async_wait(std::bind(&FreezeDetector::Handler, freezeDetectorRef, std::placeholders::_1));
+            freezeDetector->_timer.async_wait([freezeDetectorRef = std::move(freezeDetectorRef)](boost::system::error_code const& error) mutable
+            {
+                Handler(std::move(freezeDetectorRef), error);
+            });
         }
     }
 }
@@ -596,19 +631,7 @@ bool LoadRealmInfo()
 {
     if (Realm const* realmListRealm = sRealmList->GetRealm(realm.Id))
     {
-        realm.Id = realmListRealm->Id;
-        realm.Build = realmListRealm->Build;
-        realm.ExternalAddress = std::make_unique<boost::asio::ip::address>(*realmListRealm->ExternalAddress);
-        realm.LocalAddress = std::make_unique<boost::asio::ip::address>(*realmListRealm->LocalAddress);
-        realm.LocalSubnetMask = std::make_unique<boost::asio::ip::address>(*realmListRealm->LocalSubnetMask);
-        realm.Port = realmListRealm->Port;
-        realm.Name = realmListRealm->Name;
-        realm.NormalizedName = realmListRealm->NormalizedName;
-        realm.Type = realmListRealm->Type;
-        realm.Flags = realmListRealm->Flags;
-        realm.Timezone = realmListRealm->Timezone;
-        realm.AllowedSecurityLevel = realmListRealm->AllowedSecurityLevel;
-        realm.PopulationLevel = realmListRealm->PopulationLevel;
+        realm = *realmListRealm;
         return true;
     }
 
@@ -655,8 +678,9 @@ bool StartDB()
 
 void StopDB()
 {
-    CharacterDatabase.Close();
+    HotfixDatabase.Close();
     WorldDatabase.Close();
+    CharacterDatabase.Close();
     LoginDatabase.Close();
 
     MySQL::Library_End();
@@ -674,26 +698,24 @@ void ClearOnlineAccounts()
     // Battleground instance ids reset at server restart
     CharacterDatabase.DirectExecute("UPDATE character_battleground_data SET instanceId = 0");
 }
-
 /// @}
 
-variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile, std::string& configService)
+variables_map GetConsoleArguments(int argc, char** argv, fs::path& configFile, fs::path& configDir, [[maybe_unused]] std::string& winServiceAction)
 {
-    // Silences warning about configService not be used if the OS is not Windows
-    (void)configService;
-
     options_description all("Allowed options");
     all.add_options()
         ("help,h", "print usage message")
         ("version,v", "print version build info")
         ("config,c", value<fs::path>(&configFile)->default_value(fs::absolute(_TRINITY_CORE_CONFIG)),
                      "use <arg> as configuration file")
+        ("config-dir,cd", value<fs::path>(&configDir)->default_value(fs::absolute(_TRINITY_CORE_CONFIG_DIR)),
+                     "use <arg> as directory with additional config files")
         ("update-databases-only,u", "updates databases only")
         ;
 #ifdef _WIN32
     options_description win("Windows platform specific options");
     win.add_options()
-        ("service,s", value<std::string>(&configService)->default_value(""), "Windows service options: [install | uninstall]")
+        ("service,s", value<std::string>(&winServiceAction)->default_value(""), "Windows service options: [install | uninstall]")
         ;
 
     all.add(win);

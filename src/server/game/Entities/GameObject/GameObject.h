@@ -35,6 +35,21 @@ struct Loot;
 struct TransportAnimation;
 enum TriggerCastFlags : uint32;
 
+namespace Vignettes
+{
+struct VignetteData;
+}
+
+// enum for GAMEOBJECT_TYPE_NEW_FLAG
+// values taken from world state
+enum class FlagState : uint8
+{
+    InBase = 1,
+    Taken,
+    Dropped,
+    Respawning
+};
+
 namespace WorldPackets
 {
     namespace Battleground
@@ -60,6 +75,8 @@ public:
     virtual void Update([[maybe_unused]] uint32 diff) { }
     virtual void OnStateChanged([[maybe_unused]] GOState oldState, [[maybe_unused]] GOState newState) { }
     virtual void OnRelocated() { }
+    virtual bool IsNeverVisibleFor([[maybe_unused]] WorldObject const* seer, [[maybe_unused]] bool allowServersideObjects) const { return false; }
+    virtual void ActivateObject([[maybe_unused]] GameObjectActions action, [[maybe_unused]] int32 param, [[maybe_unused]] WorldObject* spellCaster = nullptr, [[maybe_unused]] uint32 spellId = 0, [[maybe_unused]] int32 effectIndex = -1) { }
 
 protected:
     GameObject& _owner;
@@ -77,6 +94,30 @@ public:
 private:
     bool _on;
 };
+
+class TC_GAME_API SetNewFlagState : public GameObjectTypeBase::CustomCommand
+{
+public:
+    explicit SetNewFlagState(FlagState state, Player* player);
+
+    void Execute(GameObjectTypeBase& type) const override;
+
+private:
+    FlagState _state;
+    Player* _player;
+};
+
+class TC_GAME_API SetControlZoneValue : public GameObjectTypeBase::CustomCommand
+{
+public:
+    explicit SetControlZoneValue(Optional<uint32> value = { });
+
+    void Execute(GameObjectTypeBase& type) const override;
+
+private:
+    Optional<uint32> _value;
+};
+
 }
 
 union GameObjectValue
@@ -95,7 +136,7 @@ union GameObjectValue
     struct
     {
         uint32 Health;
-        uint32 MaxHealth;
+        ::DestructibleHitpoint const* DestructibleHitpoint;
     } Building;
     //42 GAMEOBJECT_TYPE_CAPTURE_POINT
     struct
@@ -187,6 +228,7 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
         bool LoadFromDB(ObjectGuid::LowType spawnId, Map* map, bool addToMap, bool = true); // arg4 is unused, only present to match the signature on Creature
         static bool DeleteFromDB(ObjectGuid::LowType spawnId);
 
+        ObjectGuid GetCreatorGUID() const override { return m_gameObjectData->CreatedBy; }
         void SetOwnerGUID(ObjectGuid owner)
         {
             // Owner already found and different than expected owner - remove object from old owner
@@ -296,6 +338,7 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
 
         bool hasQuest(uint32 quest_id) const override;
         bool hasInvolvedQuest(uint32 quest_id) const override;
+        bool CanActivateForPlayer(Player const* target) const;
         bool ActivateToQuest(Player const* target) const;
         void UseDoorOrButton(uint32 time_to_restore = 0, bool alternative = false, Unit* user = nullptr);
                                                             // 0 = use `gameobject`.`spawntimesecs`
@@ -304,7 +347,7 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
 
         void TriggeringLinkedGameObject(uint32 trapEntry, Unit* target);
 
-        bool IsNeverVisibleFor(WorldObject const* seer) const override;
+        bool IsNeverVisibleFor(WorldObject const* seer, bool allowServersideObjects = false) const override;
         bool IsAlwaysVisibleFor(WorldObject const* seer) const override;
         bool IsInvisibleDueToDespawn(WorldObject const* seer) const override;
 
@@ -331,10 +374,15 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
         void SetRespawnCompatibilityMode(bool mode = true) { m_respawnCompatibilityMode = mode; }
         bool GetRespawnCompatibilityMode() {return m_respawnCompatibilityMode; }
 
+        std::string const& GetAIName() const;
         uint32 GetScriptId() const;
         GameObjectAI* AI() const { return m_AI; }
 
-        std::string const& GetAIName() const;
+        void InheritStringIds(GameObject const* parent);
+        bool HasStringId(std::string_view id) const;
+        void SetScriptStringId(std::string id);
+        std::string_view GetStringId(StringIdType type) const { return m_stringIds[size_t(type)] ? std::string_view(*m_stringIds[size_t(type)]) : std::string_view(); }
+
         void SetDisplayId(uint32 displayid);
         uint32 GetDisplayId() const { return m_gameObjectData->DisplayID; }
         uint8 GetNameSetId() const;
@@ -378,10 +426,18 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
         uint32 GetWorldEffectID() const { return _worldEffectID; }
         void SetWorldEffectID(uint32 worldEffectID) { _worldEffectID = worldEffectID; }
 
+        Vignettes::VignetteData const* GetVignette() const { return m_vignette.get(); }
+        void SetVignette(uint32 vignetteId);
+
         void SetSpellVisualId(int32 spellVisualId, ObjectGuid activatorGuid = ObjectGuid::Empty);
         void AssaultCapturePoint(Player* player);
         void UpdateCapturePoint();
         bool CanInteractWithCapturePoint(Player const* target) const;
+        FlagState GetFlagState() const;
+        ObjectGuid const& GetFlagCarrierGUID() const;
+        time_t GetFlagTakenFromBaseTime() const;
+
+        GuidUnorderedSet const* GetInsidePlayers() const;
 
         bool MeetsInteractCondition(Player const* user) const;
 
@@ -427,6 +483,8 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
         GameObjectData const* m_goData;
         std::unique_ptr<GameObjectTypeBase> m_goTypeImpl;
         GameObjectValue m_goValue; // TODO: replace with m_goTypeImpl
+        std::array<std::string const*, 3> m_stringIds;
+        Optional<std::string> m_scriptStringId;
 
         int64 m_packedRotation;
         QuaternionData m_localRotation;
@@ -453,6 +511,8 @@ class TC_GAME_API GameObject : public WorldObject, public GridObject<GameObject>
         bool m_respawnCompatibilityMode;
         uint16 _animKitId;
         uint32 _worldEffectID;
+
+        std::unique_ptr<Vignettes::VignetteData> m_vignette;
 
         struct PerPlayerState
         {
